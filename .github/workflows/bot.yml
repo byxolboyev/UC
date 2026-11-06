@@ -1,0 +1,71 @@
+name: UC Shop Bot
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # har 30 daqiqada: ishlamayotgan bo'lsa navbatga qo'yadi
+  workflow_dispatch:         # qo'lda ishga tushirish
+  push:
+    branches: [main]
+
+permissions:
+  contents: write            # baza zaxirasini `data` branch'ga yozish uchun
+  actions: write             # o'zini qayta ishga tushirish uchun
+
+# Bir vaqtda faqat BITTA bot ishlaydi (ikkita bo'lsa Telegram 409 xatosi beradi).
+# Yangi ishga tushirish navbatda kutadi va eskisi tugagach boshlanadi.
+concurrency:
+  group: uc-shop-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358     # GitHub chegarasi 360 daqiqa
+    env:
+      DB_PASSPHRASE: ${{ secrets.DB_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Kutubxonalar
+        run: pip install -r requirements.txt
+
+      - name: Bazani tiklash
+        run: bash ci/restore.sh
+
+      - name: Botni ishga tushirish
+        id: bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          ADMIN_IDS: ${{ secrets.ADMIN_IDS }}
+          CHECKOUT_API_KEY: ${{ secrets.CHECKOUT_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # har 5 daqiqada bazani zaxiralab turadi
+          ( while true; do sleep 300; bash ci/backup.sh || echo "zaxira xatosi"; done ) &
+          BK=$!
+          set +e
+          timeout 345m python main.py
+          rc=$?
+          kill $BK 2>/dev/null
+          echo "bot chiqish kodi: $rc"
+          if [ "$rc" -eq 124 ]; then
+            echo "again=1" >> "$GITHUB_OUTPUT"   # vaqt tugadi (normal) -> qayta ishga tushiramiz
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Oxirgi zaxira
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/backup.sh || echo "zaxira xatosi"
+
+      - name: Qayta ishga tushirish
+        if: steps.bot.outputs.again == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml
